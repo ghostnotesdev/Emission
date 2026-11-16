@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Emission.CodeGen/Emission.CodeGen.csproj" Id="1e1f11f0-1bf7-4ad7-a51f-d7398354a3c5" />
+  <Project Path="Emission/Emission.csproj" />
+  <Project Path="Tests/Emission.UnitTests.csproj" />
+</Solution>
