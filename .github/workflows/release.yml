@@ -226,7 +226,17 @@ jobs:
         env:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
         run: |
-          dotnet nuget push "./artifacts/release/*.nupkg" `
+          $packages = @(Get-ChildItem ./artifacts/release -Filter *.nupkg -File)
+
+          if ($packages.Count -ne 1) {
+            throw "Expected exactly one NuGet package, found $($packages.Count)."
+          }
+
+          $package = $packages[0].FullName
+
+          Write-Host "Publishing $($packages[0].Name)"
+
+          dotnet nuget push $package `
             --source "https://api.nuget.org/v3/index.json" `
             --api-key $env:NUGET_API_KEY
 
