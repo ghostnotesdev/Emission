@@ -1,0 +1,249 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emission-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate Release
+    runs-on: windows-latest
+
+    permissions:
+      contents: read
+      actions: read
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.commit.outputs.sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Determine commit
+        id: commit
+        shell: pwsh
+        run: |
+          $sha = (git rev-parse HEAD).Trim()
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+
+      - name: Verify CI passed
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          $runsJson = gh run list `
+            --repo $env:GITHUB_REPOSITORY `
+            --workflow ci.yml `
+            --commit $env:RELEASE_SHA `
+            --event push `
+            --limit 100 `
+            --json headSha,status,conclusion,databaseId,createdAt
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to query CI workflow runs."
+          }
+
+          $runs = @(ConvertFrom-Json -InputObject $runsJson)
+
+          $latestRun = $runs |
+            Where-Object { $_.headSha -eq $env:RELEASE_SHA } |
+            Sort-Object createdAt -Descending |
+            Select-Object -First 1
+
+          if (-not $latestRun) {
+            throw "No CI run found for commit $env:RELEASE_SHA."
+          }
+
+          if ($latestRun.status -ne "completed" -or
+              $latestRun.conclusion -ne "success") {
+            throw "CI has not succeeded for commit $env:RELEASE_SHA."
+          }
+
+          Write-Host "CI passed (run $($latestRun.databaseId))."
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore
+        run: dotnet restore --locked-mode
+
+      - name: Build
+        run: dotnet build --no-restore -c Release
+
+      - name: Test
+        run: dotnet test --no-build --no-restore -c Release
+
+      - name: Pack
+        run: dotnet pack ./Emission/Emission.csproj --no-build --no-restore -c Release -o ./artifacts/packages
+
+      - name: Determine release version
+        id: version
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem ./artifacts/packages/Emission.*.nupkg)
+
+          if ($packages.Count -ne 1) {
+            throw "Expected exactly one Emission package."
+          }
+
+          $filename = $packages[0].Name
+
+          if ($filename -notmatch '^Emission\.(.+)\.nupkg$') {
+            throw "Unexpected package filename: $filename"
+          }
+
+          $version = $Matches[1]
+
+          if ($version -match '-') {
+            throw "Refusing to publish prerelease version: $version"
+          }
+
+          $tag = "v$version"
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Release: $tag"
+
+      - name: Check release does not exist
+        shell: pwsh
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git fetch origin --tags
+
+          $existingTag = git tag --list $env:TAG
+
+          if ($existingTag) {
+            throw "Tag $env:TAG already exists."
+          }
+
+      - name: Stage release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ./artifacts/release
+
+          Copy-Item ./artifacts/packages/*.nupkg ./artifacts/release/
+          Copy-Item ./Emission/bin/Release/netstandard2.0/Emission.dll ./artifacts/release/
+          Copy-Item ./Emission/bin/Release/netstandard2.0/Emission.pdb ./artifacts/release/
+
+          $xml = "./Emission/bin/Release/netstandard2.0/Emission.xml"
+
+          if (Test-Path $xml) {
+            Copy-Item $xml ./artifacts/release/
+          }
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: emission-release-${{ steps.version.outputs.version }}
+          path: ./artifacts/release/*
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: Publish Release
+    needs: validate
+    runs-on: windows-latest
+    environment: nuget
+
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Verify release tag is still available
+        shell: pwsh
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          git fetch origin --tags
+
+          if (git tag --list $env:TAG) {
+            throw "Release tag $env:TAG already exists."
+          }
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: emission-release-${{ needs.validate.outputs.version }}
+          path: ./artifacts/release
+
+      - name: Create draft GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+        run: |
+          $assets = @(Get-ChildItem ./artifacts/release -File |
+            Select-Object -ExpandProperty FullName)
+
+          gh release create $env:TAG `
+            $assets `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:RELEASE_SHA `
+            --title "Emission $env:VERSION" `
+            --generate-notes `
+            --draft
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create GitHub release."
+          }
+
+      - name: Authenticate with NuGet.org
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ secrets.NUGET_USERNAME }}
+
+      - name: Publish to NuGet.org
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push "./artifacts/release/*.nupkg" `
+            --source "https://api.nuget.org/v3/index.json" `
+            --api-key $env:NUGET_API_KEY
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "NuGet publishing failed."
+          }
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          gh release edit $env:TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --draft=false
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to publish GitHub release."
+          }
