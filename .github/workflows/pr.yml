@@ -27,36 +27,11 @@ jobs:
       - name: Build
         run: dotnet build --no-restore -c Release
 
-      - name: Test with coverage
-        run: >
-          dotnet test
-          --no-build
-          -c Release
-          --collect:"XPlat Code Coverage"
-          --
-          DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover
-
-      - name: Verify coverage generated
-        shell: pwsh
-        run: |
-          $reports = @(Get-ChildItem -Recurse -Filter coverage.opencover.xml)
-
-          if ($reports.Count -eq 0) {
-            throw "No coverage reports were generated."
-          }
-
-          Write-Host "Generated $($reports.Count) coverage report(s)."
-
-      - name: Upload coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: emission-coverage
-          path: '**/TestResults/**/coverage.opencover.xml'
-          if-no-files-found: error
+      - name: Test
+        run: dotnet test --no-build -c Release
 
   sonar:
     name: SonarQube Analysis
-    needs: build
     uses: ./.github/workflows/sonar.yml
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

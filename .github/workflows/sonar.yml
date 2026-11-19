@@ -33,12 +33,6 @@ jobs:
         shell: pwsh
         run: dotnet tool install --global dotnet-sonarscanner
 
-      - name: Download coverage
-        uses: actions/download-artifact@v4
-        with:
-          name: emission-coverage
-          path: ./coverage
-
       - name: Begin analysis
         shell: pwsh
         env:
@@ -48,13 +42,34 @@ jobs:
             /k:"ghostnotesdev_Emission" `
             /o:"ghostnotesdev" `
             /d:sonar.token="$env:SONAR_TOKEN" `
-            /d:sonar.cs.opencover.reportsPaths="coverage/**/coverage.opencover.xml"
+            /d:sonar.cs.opencover.reportsPaths="**/TestResults/**/coverage.opencover.xml"
 
       - name: Restore
         run: dotnet restore --locked-mode
 
       - name: Build
         run: dotnet build --no-restore -c Release
+
+      - name: Test with coverage
+        run: >
+          dotnet test
+          --no-build
+          --no-restore
+          -c Release
+          --collect:"XPlat Code Coverage"
+          --
+          DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover
+
+      - name: Verify coverage generated
+        shell: pwsh
+        run: |
+          $reports = @(Get-ChildItem -Recurse -Filter coverage.opencover.xml)
+
+          if ($reports.Count -eq 0) {
+            throw "No coverage reports were generated."
+          }
+
+          Write-Host "Generated $($reports.Count) coverage report(s)."
 
       - name: End analysis
         shell: pwsh
